@@ -1,9 +1,12 @@
-trigger: none
+trigger:
+- 'main'
 
 variables:
   buildConfiguration: 'Release'
+  leaderboardRepository: 'leaderboard'
   webRepository: 'web'
   tag: '$(Build.BuildId)'
+  imagePullSecret: 'secret'
 
 stages:
 - stage: 'Build'
@@ -24,20 +27,53 @@ stages:
         containerRegistry: 'Container Registry Connection'
         tags: |
           $(tag)
+    
+    - task: Docker@2
+      displayName: 'Build and push the leaderboard image to container registry'
+      inputs:
+        command: buildAndPush
+        buildContext: $(Build.Repository.LocalPath)
+        repository: $(leaderboardRepository)
+        dockerfile: '$(Build.SourcesDirectory)/Tailspin.SpaceGame.LeaderboardContainer/Dockerfile'
+        containerRegistry: 'Container Registry Connection'
+        tags: |
+          $(tag)
+
+    - publish: '$(Build.SourcesDirectory)/manifests'
+      artifact: manifests
 
 - stage: 'Deploy'
-  displayName: 'Deploy the container'
+  displayName: 'Deploy the containers'
   dependsOn: Build
   jobs:
-  - job: 'Deploy'
-    displayName: 'Deploy job'
+  - deployment: Deploy
+    displayName: Deploy
     pool:
       vmImage: 'ubuntu-20.04'
+    environment: 'Dev'
     variables:
     - group: Release
-    steps:
-    - task: AzureWebAppContainer@1
-      inputs:
-       appName: $(WebAppName)
-       azureSubscription: 'Resource Manager - Tailspin - Space Game'
-       imageName: $(RegistryName)/$(webRepository):$(build.buildId)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: manifests
+
+- task: KubernetesManifest@1
+  displayName: Deploy to Kubernetes cluster
+  inputs:
+    action: deploy
+    connectionType: azureResourceManager
+    azureSubscriptionConnection: 'Kubernetes Cluster Connection'
+    azureResourceGroup: 'tailspin-space-game-rg'
+    kubernetesCluster: 'tailspinspacegame-24591'
+    namespace: 'default'
+    manifests: |
+      $(Pipeline.Workspace)/manifests/deployment.yml
+      $(Pipeline.Workspace)/manifests/service.yml
+    imagePullSecrets: |
+      $(imagePullSecret)
+    containers: |
+      $(RegistryName)/$(webRepository):$(tag)
+      $(RegistryName)/$(leaderboardRepository):$(tag)
